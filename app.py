@@ -22,19 +22,21 @@ GLOBAL_KNOWLEDGE_FILE = "shared_knowledge.csv"
 PERSONAL_BLACKLIST = ["zelle", "venmo", "transfer", "online banking", "payment", "epay", "check", "deposit", "payroll", "ach"]
 
 # 扩充银行通用词黑名单，防止误杀
+# 扩充银行通用词黑名单，防止误杀
 STOP_WORDS = {
-    # 原始停用词
+    # 无意义词汇
     "the", "and", "store", "shop", "cafe", "restaurant", "market", 
     "inc", "llc", "com", "www", "st", "rd", "ave", "san", "jose", 
     "francisco", "ca", "ny", "tx", "pay", "payment", "bill", "sq", 
-    "tst", "pos", "terminal", "valley", "fair", "center",
+    "tst", "pos", "terminal", "valley", "fair", "center", "city",
+    "santa", "clara", "diego", "monica", "sunnyvale", "los", "angeles",
     
-    # 【新增】银行账单中的剧毒通用词
+    # 银行账单中的剧毒通用词
     "purchase", "refund", "return", "debit", "credit", "card",
     "auth", "authorized", "transaction", "fee", "transfer", "direct",
-    "dep", "deposit", "withdrawal", "atm", "online", "banking",
-    "recurring", "recurring payment", "recurring trans", "recurring txn"
+    "dep", "deposit", "withdrawal", "atm", "online", "banking"
 }
+
 CATEGORIES = [
     "☕️ 咖啡奶茶", "🍱 餐饮外卖", "🛍️ 购物超市", "🛒 宠物消费", "🚗 交通油费",
     "✈️ 旅行住宿", "🧘🏻‍♀️ 运动健身", "🎿 娱乐票务", "🏥 医疗健康", "🏠 房租水电",
@@ -141,96 +143,87 @@ def update_global_knowledge(description, category):
     save_global_knowledge(global_df)
     return True
 
+def extract_core_features(text):
+    """提取商户名的核心特征词组 (过滤掉地点、日期、通用词)"""
+    text = str(text).lower()
+    
+    # 1. 剔除常见的收银机前缀
+    text = re.sub(r'^(sq\s*\*|tst\s*\*|sp\s*\*|paypal\s*\*|poy\s*\*|dd\s+doordash\s*)', '', text)
+    
+    # 2. 剔除日期格式 (如 04/25, 11/18) 和 电话号码
+    text = re.sub(r'\b\d{2}/\d{2}\b', ' ', text)
+    text = re.sub(r'\b\d{3}-\d{3}-\d{4}\b', ' ', text)
+    
+    # 3. 提取有效字母词
+    words = []
+    for w in re.split(r'[^a-z0-9]', text):
+        # 只要长度>=3，且不是数字，且不是停用词/地点词，就认为是特征词
+        if len(w) >= 3 and not w.isnumeric() and w not in STOP_WORDS:
+            words.append(w)
+            
+    return words
 
 def are_names_similar(name1, name2):
-    """判断两个商户名是否指向同一家店 (防误杀版核心词交集法)"""
-    def extract_core_words(text):
-        # 1. 移除日期格式 (如 04/25, 04/07) 和电话号码格式 (如 800-672-4399)
-        clean_text = re.sub(r'\b\d{2}/\d{2}\b', ' ', str(text))
-        clean_text = re.sub(r'\b\d{3}-\d{3}-\d{4}\b', ' ', clean_text)
-        
-        # 2. 转小写并去除非字母数字
-        clean_text = re.sub(r'[^a-z0-9\s]', ' ', clean_text.lower())
-        
-        # 3. 提取有效词
-        words = []
-        for w in clean_text.split():
-            # 过滤短词、纯数字和停用词。要求词长至少为 4（防止匹配到如 'gas' 导致所有的加油站串联）
-            if len(w) >= 4 and not w.isnumeric() and w not in STOP_WORDS:
-                words.append(w)
-        return words
-
-    words1 = extract_core_words(name1)
-    words2 = extract_core_words(name2)
+    """基于核心特征词组的相似度判定"""
+    features1 = extract_core_features(name1)
+    features2 = extract_core_features(name2)
     
-    # 如果任意一方没有提取出有效词，拒绝关联，避免瞎匹配
-    if not words1 or not words2:
+    if not features1 or not features2:
         return False
         
-    # 策略 1：如果它们最核心的第一个词（通常是主店名）一样，判定为同店。
-    # 比如 COSTCO WHSE 和 COSTCO GAS，第一个词都是 costco
-    if words1[0] == words2[0]:
+    # 核心策略：只要它们提取出的最核心的第一个特征词一样，就认为是同店
+    # 比如: ['mipot'] 和 ['mipot']
+    # 比如: ['erewhon'] 和 ['erewhon']
+    if features1[0] == features2[0]:
         return True
         
-    # 策略 2：提取出词的集合（Set），如果它们有交集，判定为同店。
-    # 因为我们已经限制了词长必须 >= 4 且剔除了所有剧毒词，此时的交集应该非常纯粹。
-    intersection = set(words1).intersection(set(words2))
+    # 辅助策略：如果有多个特征词，只要交集达到一定比例也可以
+    intersection = set(features1).intersection(set(features2))
     return len(intersection) >= 1
+
 
 
 # ==========================================
 # 分类引擎
 # ==========================================
 def auto_categorize(description, amount):
-    """升级版分类引擎：支持智能去噪与双向包含匹配"""
-    desc = str(description).lower()
-    
-    # 【智能去噪】移除常见的支付网关前缀 (比如 "SQ *", "TST *", "PAYPAL *") 和特殊符号
-    # 这样 "SQ *TAIWAN PORRIDGE" 就会变成 "taiwan porridge"
-    clean_desc = re.sub(r'^(sq\s*\*|tst\s*\*|sp\s*\*|paypal\s*\*|poy\s*\*|dd\s+doordash\s*)', '', desc).strip()
-    
-    # 提取纯字母单词用于后续分析
-    alpha_desc = re.sub(r'[^a-z0-9\s]', ' ', clean_desc)
-    desc_words = [w for w in alpha_desc.split() if len(w) > 1]
+    """结合全局大脑和本地字典的分类引擎 (引入特征评分机制)"""
+    desc = str(description).strip()
     
     # 1. 优先去查询【全局共享大脑】
     global_df = load_global_knowledge()
     if not global_df.empty:
         valid_history = global_df[global_df['类别'].isin(CATEGORIES)].copy()
-        valid_history['lower_desc'] = valid_history['交易描述'].str.lower()
         
-        # A. 绝对精确匹配
-        exact_match = valid_history[valid_history['lower_desc'] == desc]
+        # A. 绝对精确匹配 (如果名字一字不差，秒杀)
+        exact_match = valid_history[valid_history['交易描述'].str.lower() == desc.lower()]
         if not exact_match.empty:
             return exact_match.iloc[-1]['类别']
             
-        # B. 智能双向包含匹配 (解决加了分店名或流水号就不认识的问题)
-        for _, row in valid_history.iterrows():
-            hist_desc = row['lower_desc']
-            # 对记忆库里的名字也进行去噪
-            hist_clean = re.sub(r'^(sq\s*\*|tst\s*\*|sp\s*\*|paypal\s*\*|poy\s*\*|dd\s+doordash\s*)', '', hist_desc).strip()
-            
-            # 条件1：记忆名称包含在当前账单中（如：记忆是taiwan porridge，账单是 taiwan porridge fremont）
-            if len(hist_clean) > 4 and hist_clean in clean_desc:
-                return row['类别']
-                
-            # 条件2：当前账单包含在记忆名称中（如：账单是aesop，记忆是 aesop valley fair）
-            if len(clean_desc) > 4 and clean_desc in hist_clean:
-                return row['类别']
-                
-        # C. 核心双词匹配 (容错机制)
-        if len(desc_words) >= 2:
+        # B. 智能特征匹配 (拿着新账单，去数据库里找同店兄弟)
+        desc_features = extract_core_features(desc)
+        
+        if desc_features: # 如果提取出了有效特征
             for _, row in valid_history.iterrows():
-                h_alpha = re.sub(r'[^a-z0-9\s]', ' ', row['lower_desc'])
-                h_words = [w for w in h_alpha.split() if len(w) > 1]
-                if len(h_words) >= 2:
-                    if h_words[0] == desc_words[0] and h_words[1] == desc_words[1]:
+                hist_desc = str(row['交易描述'])
+                hist_features = extract_core_features(hist_desc)
+                
+                if hist_features:
+                    # 如果这笔新交易的首要特征词，和数据库某条记录的首要特征词一样
+                    # 比如新交易是 "MIPOT 09/01 PURCHASE"，提取出 'mipot'
+                    # 数据库里有 "MIPOT 04/25 PURCHASE SUNNYVALE"，也提取出 'mipot'
+                    if desc_features[0] == hist_features[0]:
+                        return row['类别']
+                        
+                    # 或者特征词有交集
+                    if set(desc_features).intersection(set(hist_features)):
                         return row['类别']
     
     # 2. 如果公共大脑不知道，去问【本地内置字典】
+    desc_lower = desc.lower()
     for category, keywords in KEYWORD_MAPPING.items():
         for keyword in keywords:
-            if keyword in desc or keyword.replace(' ', '') in desc.replace(' ', ''):
+            if keyword in desc_lower or keyword.replace(' ', '') in desc_lower.replace(' ', ''):
                 return category
             
     # 3. 兜底逻辑
