@@ -26,23 +26,24 @@ CATEGORIES = [
     "📦 生活杂项", "🏦 银行手续费", "💳 信用卡还款", "💰 内部转账", "其他", "其他收入"
 ]
 
-# 初始内置字典（Fallback）
+# 初始内置字典（加强版 Fallback）
 KEYWORD_MAPPING = {
-    "☕️ 咖啡奶茶": ["voyager", "coffee", "moon tea", "umetea", "dr.ink", "molly tea", "matcha town", "naisnow", "shuyi", "chicha", "taningca", "minglewood", "little bear cafe", "tea", "starbucks", "peets"],
-    "🍱 餐饮外卖": ["bafang", "dumpling", "chipotle", "doordash", "dd *", "fantuan", "seamless", "hunan mifen", "malatang", "sweetgreen", "lee's sandwiches", "snack*", "uep*", "restaurant", "dining", "mcdonald", "wendy", "popeyes", "kfc", "noodle", "kitchen", "sushi", "bistro", "cafe", "pizza", "waiter.com"],
-    "🛍️ 购物超市": ["amazon", "amzn", "sephora", "lancome", "sports basement", "parallel mountian", "target", "walmart", "costco whse", "safeway", "99 ranch", "weee", "wholefds", "whole foods", "trader joe", "grocery"],
-    "🛒 宠物消费": ["petsmart", "chewy", "petco"],
-    "🚗 交通油费": ["gas", "chevron", "shell", "exxon", "uber", "lyft", "caltrain", "parking", "fastrak", "toll", "transit", "bart"],
+    "☕️ 咖啡奶茶": ["boba", "milk tea", "roaster", "voyager", "coffee", "moon tea", "umetea", "dr.ink", "molly tea", "matcha town", "naisnow", "shuyi", "chicha", "taningca", "minglewood", "little bear cafe", "tea", "starbucks", "peets"],
+    "🍱 餐饮外卖": ["porridge", "noodle", "bbq", "grill", "bakery", "cake", "pho", "bafang", "dumpling", "chipotle", "doordash", "dd *", "fantuan", "seamless", "hunan mifen", "malatang", "sweetgreen", "lee's sandwiches", "snack*", "uep*", "restaurant", "dining", "mcdonald", "wendy", "popeyes", "kfc", "kitchen", "sushi", "bistro", "cafe", "pizza", "waiter.com"],
+    "🛍️ 购物超市": ["market", "mart", "grocery", "plaza", "amazon", "amzn", "sephora", "lancome", "sports basement", "parallel mountian", "target", "walmart", "costco", "safeway", "99 ranch", "weee", "wholefds", "whole foods", "trader joe"],
+    "🛒 宠物消费": ["vet", "veterinary", "petsmart", "chewy", "petco"],
+    "🚗 交通油费": ["auto", "car wash", "repair", "gas", "chevron", "shell", "exxon", "uber", "lyft", "caltrain", "parking", "fastrak", "toll", "transit", "bart"],
     "✈️ 旅行住宿": ["alaska air", "united", "delta", "american air", "southwest", "hotel", "resort", "airbnb", "marriott", "hilton", "hyatt", "motel", "expedia", "booking.com", "outrigger"],
     "🧘🏻‍♀️ 运动健身": ["pilates", "glowlab", "yoga", "gym", "golf", "golfnow", "golf cour"],
     "🎿 娱乐票务": ["palisades", "tahoe", "ski", "movie", "steam games", "tm *", "ticketmaster", "livenation", "amc", "cinemark", "stubhub", "concert"],
-    "🏥 医疗健康": ["quest diagnostics", "qdi", "cvs", "pharmacy", "walgreens", "hospital", "pets best", "pet insurance", "kaiser", "sutter"],
+    "🏥 医疗健康": ["dental", "dentist", "clinic", "doctor", "vision", "quest diagnostics", "qdi", "cvs", "pharmacy", "walgreens", "hospital", "pets best", "pet insurance", "kaiser", "sutter"],
     "🏠 房租水电": ["jpmorgan-bzb312", "jpmorgan-bzo4312", "yardi service", "ladwp", "pgande", "rent", "water", "trash", "sewer"],
     "📦 生活杂项": ["usps", "comcast", "utilities", "apple", "google", "openai"],
     "🏦 银行手续费": ["annual membership fee", "fee", "interest"],
     "💳 信用卡还款": ["payment thank you", "autopay", "payment to", "chase card", "credit card bill payment", "chase credit crd", "american express des:ach", "epay", "online banking payment to crd"],
     "💰 内部转账": ["online banking transfer", "zelle payment", "venmo"]
 }
+
 
 # ==========================================
 # 会话状态管理 (确保用户数据不污染服务器)
@@ -103,7 +104,7 @@ def save_global_knowledge(df):
                 print(f"GitHub Sync Failed: {put_resp.text}")
         except Exception as e:
             print(f"GitHub API Error: {str(e)}")
-            
+
 def update_global_knowledge(description, category):
     """
     当任何用户修正分类时，尝试更新到全局大脑。
@@ -137,29 +138,50 @@ def update_global_knowledge(description, category):
 # 分类引擎
 # ==========================================
 def auto_categorize(description, amount):
-    """结合全局大脑和本地字典的分类引擎"""
+    """升级版分类引擎：支持智能去噪与双向包含匹配"""
     desc = str(description).lower()
+    
+    # 【智能去噪】移除常见的支付网关前缀 (比如 "SQ *", "TST *", "PAYPAL *") 和特殊符号
+    # 这样 "SQ *TAIWAN PORRIDGE" 就会变成 "taiwan porridge"
+    clean_desc = re.sub(r'^(sq\s*\*|tst\s*\*|sp\s*\*|paypal\s*\*|poy\s*\*|dd\s+doordash\s*)', '', desc).strip()
+    
+    # 提取纯字母单词用于后续分析
+    alpha_desc = re.sub(r'[^a-z0-9\s]', ' ', clean_desc)
+    desc_words = [w for w in alpha_desc.split() if len(w) > 1]
     
     # 1. 优先去查询【全局共享大脑】
     global_df = load_global_knowledge()
     if not global_df.empty:
-        global_df['lower_desc'] = global_df['交易描述'].str.lower()
+        valid_history = global_df[global_df['类别'].isin(CATEGORIES)].copy()
+        valid_history['lower_desc'] = valid_history['交易描述'].str.lower()
         
-        # 精确匹配
-        valid_history = global_df[global_df['类别'].isin(CATEGORIES)]
-        if not valid_history.empty:
-            match = valid_history[valid_history['lower_desc'] == desc]
-            if not match.empty:
-                return match.iloc[-1]['类别']
+        # A. 绝对精确匹配
+        exact_match = valid_history[valid_history['lower_desc'] == desc]
+        if not exact_match.empty:
+            return exact_match.iloc[-1]['类别']
+            
+        # B. 智能双向包含匹配 (解决加了分店名或流水号就不认识的问题)
+        for _, row in valid_history.iterrows():
+            hist_desc = row['lower_desc']
+            # 对记忆库里的名字也进行去噪
+            hist_clean = re.sub(r'^(sq\s*\*|tst\s*\*|sp\s*\*|paypal\s*\*|poy\s*\*|dd\s+doordash\s*)', '', hist_desc).strip()
+            
+            # 条件1：记忆名称包含在当前账单中（如：记忆是taiwan porridge，账单是 taiwan porridge fremont）
+            if len(hist_clean) > 4 and hist_clean in clean_desc:
+                return row['类别']
                 
-            # 模糊匹配 (前两个单词)
-            desc_words = desc.split()
-            if len(desc_words) >= 2:
-                for _, row in valid_history.iterrows():
-                    hist_words = row['lower_desc'].split()
-                    if len(hist_words) >= 2:
-                        if hist_words[0] == desc_words[0] and hist_words[1] == desc_words[1]:
-                            return row['类别']
+            # 条件2：当前账单包含在记忆名称中（如：账单是aesop，记忆是 aesop valley fair）
+            if len(clean_desc) > 4 and clean_desc in hist_clean:
+                return row['类别']
+                
+        # C. 核心双词匹配 (容错机制)
+        if len(desc_words) >= 2:
+            for _, row in valid_history.iterrows():
+                h_alpha = re.sub(r'[^a-z0-9\s]', ' ', row['lower_desc'])
+                h_words = [w for w in h_alpha.split() if len(w) > 1]
+                if len(h_words) >= 2:
+                    if h_words[0] == desc_words[0] and h_words[1] == desc_words[1]:
+                        return row['类别']
     
     # 2. 如果公共大脑不知道，去问【本地内置字典】
     for category, keywords in KEYWORD_MAPPING.items():
