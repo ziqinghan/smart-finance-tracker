@@ -198,6 +198,72 @@ def auto_categorize(description, amount):
 
     return "其他"
 
+
+def apply_refund_cancellation(df):
+    """升级版退款抵消魔法：精准消除相同商户的正负账单"""
+    if df.empty: return df, 0
+    
+    # 筛选出所有可能是退款的记录（金额大于0，且不是还款/转账/收入）
+    refund_candidates = df[
+        (df['金额'] > 0) & 
+        (~df['类别'].isin(['💳 信用卡还款', '💰 内部转账', '其他收入']))
+    ].copy()
+    
+    # 筛选出所有支出
+    expense_candidates = df[df['金额'] < 0].copy()
+    
+    drop_indices = set()
+    
+    for r_idx, refund in refund_candidates.iterrows():
+        r_amount = refund['金额']
+        r_desc = str(refund['交易描述']).strip().lower()
+        
+        # 提取去噪后的核心字母，用于宽松匹配
+        # 比如把 "SQ *GLACIER DEP" 变成 "glacier dep"
+        clean_r_desc = re.sub(r'^(sq\s*\*|tst\s*\*|sp\s*\*|paypal\s*\*|poy\s*\*|dd\s+doordash\s*)', '', r_desc).strip()
+        r_words = [w for w in re.split(r'[^a-z0-9]', clean_r_desc) if len(w) > 2]
+        
+        # 寻找匹配的支出：
+        # 条件 1：金额绝对值相等（允许 0.01 误差）
+        # 条件 2：该支出还没有被别的退款抵消掉
+        possible_matches = expense_candidates[
+            (abs(expense_candidates['金额'] + r_amount) < 0.01) & 
+            (~expense_candidates.index.isin(drop_indices))
+        ]
+        
+        if possible_matches.empty:
+            continue
+            
+        match_found = False
+        
+        # 策略 A：强匹配（名字完全一致或相互包含）
+        for e_idx, expense in possible_matches.iterrows():
+            e_desc = str(expense['交易描述']).strip().lower()
+            clean_e_desc = re.sub(r'^(sq\s*\*|tst\s*\*|sp\s*\*|paypal\s*\*|poy\s*\*|dd\s+doordash\s*)', '', e_desc).strip()
+            
+            if clean_r_desc == clean_e_desc or clean_r_desc in clean_e_desc or clean_e_desc in clean_r_desc:
+                drop_indices.add(r_idx)
+                drop_indices.add(e_idx)
+                match_found = True
+                break  # 找到一个就退出循环，一对一抵消
+                
+        # 策略 B：弱匹配（前两个核心单词一致，容错分店名）
+        if not match_found and len(r_words) >= 2:
+            for e_idx, expense in possible_matches.iterrows():
+                e_desc = str(expense['交易描述']).strip().lower()
+                clean_e_desc = re.sub(r'^(sq\s*\*|tst\s*\*|sp\s*\*|paypal\s*\*|poy\s*\*|dd\s+doordash\s*)', '', e_desc).strip()
+                e_words = [w for w in re.split(r'[^a-z0-9]', clean_e_desc) if len(w) > 2]
+                
+                if len(e_words) >= 2 and r_words[0] == e_words[0] and r_words[1] == e_words[1]:
+                    drop_indices.add(r_idx)
+                    drop_indices.add(e_idx)
+                    break
+                    
+    if drop_indices:
+        df = df.drop(index=list(drop_indices)).reset_index(drop=True)
+        return df, len(drop_indices) // 2
+        
+    return df, 0
 # ==========================================
 # 解析器与清理逻辑
 # ==========================================
