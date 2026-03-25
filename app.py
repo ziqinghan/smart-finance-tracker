@@ -29,11 +29,13 @@ STOP_WORDS = {
     "tst", "pos", "terminal", "valley", "fair", "center", "city",
     "santa", "clara", "diego", "monica", "sunnyvale", "los", "angeles",
     
-    # 银行账单中的剧毒通用词
+    # 银行账单中的剧毒通用词 (新增了大量系统缩写)
     "purchase", "refund", "return", "debit", "credit", "card",
     "auth", "authorized", "transaction", "fee", "transfer", "direct",
-    "dep", "deposit", "withdrawal", "atm", "online", "banking"
+    "dep", "deposit", "withdrawal", "atm", "online", "banking",
+    "des", "indn", "web", "pmts", "epay", "crd", "xxxxx", "recurring" # <-- 新增的系统缩写
 }
+
 
 CATEGORIES = [
     "☕️ 咖啡奶茶", "🍱 餐饮外卖", "🛍️ 购物超市", "🛒 宠物消费", "🚗 交通油费",
@@ -126,31 +128,57 @@ def update_global_knowledge(description, category):
     return True
 
 def extract_core_features(text):
-    """提取商户名的核心特征词组 (过滤掉地点、日期、通用词)"""
+    """提取商户名的核心特征词组 (过滤掉地点、日期、通用词、各种ID)"""
     text = str(text).lower()
+    
+    # 1. 剔除常见的收银机前缀
     text = re.sub(r'^(sq\s*\*|tst\s*\*|sp\s*\*|paypal\s*\*|poy\s*\*|dd\s+doordash\s*)', '', text)
+    
+    # 2. 剔除日期格式 (如 04/25, 11/18) 和 电话号码
     text = re.sub(r'\b\d{2}/\d{2}\b', ' ', text)
     text = re.sub(r'\b\d{3}-\d{3}-\d{4}\b', ' ', text)
     
+    # 3. 剔除银行流水里常见的混淆ID模式 (比如 ID:XXXXX12345, CO ID:, NNX27L)
+    text = re.sub(r'\bid\s*:?\s*[a-z0-9]+\b', ' ', text)
+    text = re.sub(r'xxxxx[0-9]+', ' ', text)
+    
     words = []
     for w in re.split(r'[^a-z0-9]', text):
+        # 只要长度>=3，且不是纯数字，且不是停用词/地点词
         if len(w) >= 3 and not w.isnumeric() and w not in STOP_WORDS:
             words.append(w)
+            
     return words
 
 def are_names_similar(name1, name2):
-    """基于核心特征词组的相似度判定"""
+    """基于核心特征词组的相似度判定 (增强防误杀版)"""
     features1 = extract_core_features(name1)
     features2 = extract_core_features(name2)
     
     if not features1 or not features2:
         return False
         
+    # 核心策略 1：如果它们提取出的最核心的第一个特征词一样，大概率是同店
     if features1[0] == features2[0]:
         return True
         
+    # 核心策略 2：看交集。
     intersection = set(features1).intersection(set(features2))
-    return len(intersection) >= 1
+    
+    if not intersection:
+        return False
+        
+    # 提高门槛：如果第一个词不一样，单靠1个词的交集很容易误杀。
+    # 我们要求：至少要有 2 个词相交，或者这唯一相交的那个词必须特别长(>=6个字母，说明非常有特征)
+    if len(intersection) >= 2:
+        return True
+        
+    longest_match = max(intersection, key=len)
+    if len(longest_match) >= 6:
+        return True
+        
+    return False
+
 
 # ==========================================
 # 分类引擎
