@@ -21,12 +21,20 @@ GLOBAL_KNOWLEDGE_FILE = "shared_knowledge.csv"
 # 【个人隐私黑名单】：包含这些关键词的交易，绝对不会被上传到公共大脑
 PERSONAL_BLACKLIST = ["zelle", "venmo", "transfer", "online banking", "payment", "epay", "check", "deposit", "payroll", "ach"]
 
-# 无意义词汇黑名单（用于智能关联更新时不被这些词干扰）
-STOP_WORDS = {"the", "and", "store", "shop", "cafe", "restaurant", "market", 
-              "inc", "llc", "com", "www", "st", "rd", "ave", "san", "jose", 
-              "francisco", "ca", "ny", "tx", "pay", "payment", "bill", "sq", 
-              "tst", "pos", "terminal", "valley", "fair", "center"}
-
+# 扩充银行通用词黑名单，防止误杀
+STOP_WORDS = {
+    # 原始停用词
+    "the", "and", "store", "shop", "cafe", "restaurant", "market", 
+    "inc", "llc", "com", "www", "st", "rd", "ave", "san", "jose", 
+    "francisco", "ca", "ny", "tx", "pay", "payment", "bill", "sq", 
+    "tst", "pos", "terminal", "valley", "fair", "center",
+    
+    # 【新增】银行账单中的剧毒通用词
+    "purchase", "refund", "return", "debit", "credit", "card",
+    "auth", "authorized", "transaction", "fee", "transfer", "direct",
+    "dep", "deposit", "withdrawal", "atm", "online", "banking",
+    "recurring", "recurring payment", "recurring trans", "recurring txn"
+}
 CATEGORIES = [
     "☕️ 咖啡奶茶", "🍱 餐饮外卖", "🛍️ 购物超市", "🛒 宠物消费", "🚗 交通油费",
     "✈️ 旅行住宿", "🧘🏻‍♀️ 运动健身", "🎿 娱乐票务", "🏥 医疗健康", "🏠 房租水电",
@@ -135,27 +143,40 @@ def update_global_knowledge(description, category):
 
 
 def are_names_similar(name1, name2):
-    """判断两个商户名是否指向同一家店 (核心词交集法)"""
+    """判断两个商户名是否指向同一家店 (防误杀版核心词交集法)"""
     def extract_core_words(text):
-        # 1. 转小写并去除非字母数字
-        clean_text = re.sub(r'[^a-z0-9\s]', ' ', str(text).lower())
-        # 2. 拆分单词，过滤掉短词、纯数字和停用词
-        words = set()
+        # 1. 移除日期格式 (如 04/25, 04/07) 和电话号码格式 (如 800-672-4399)
+        clean_text = re.sub(r'\b\d{2}/\d{2}\b', ' ', str(text))
+        clean_text = re.sub(r'\b\d{3}-\d{3}-\d{4}\b', ' ', clean_text)
+        
+        # 2. 转小写并去除非字母数字
+        clean_text = re.sub(r'[^a-z0-9\s]', ' ', clean_text.lower())
+        
+        # 3. 提取有效词
+        words = []
         for w in clean_text.split():
-            if len(w) > 2 and not w.isnumeric() and w not in STOP_WORDS:
-                words.add(w)
+            # 过滤短词、纯数字和停用词。要求词长至少为 4（防止匹配到如 'gas' 导致所有的加油站串联）
+            if len(w) >= 4 and not w.isnumeric() and w not in STOP_WORDS:
+                words.append(w)
         return words
 
     words1 = extract_core_words(name1)
     words2 = extract_core_words(name2)
     
-    # 如果两者都没有提取出有效核心词，无法判断
+    # 如果任意一方没有提取出有效词，拒绝关联，避免瞎匹配
     if not words1 or not words2:
         return False
         
-    # 计算交集：只要有1个核心长单词完全匹配，我们就认为它们是一家店
-    intersection = words1.intersection(words2)
+    # 策略 1：如果它们最核心的第一个词（通常是主店名）一样，判定为同店。
+    # 比如 COSTCO WHSE 和 COSTCO GAS，第一个词都是 costco
+    if words1[0] == words2[0]:
+        return True
+        
+    # 策略 2：提取出词的集合（Set），如果它们有交集，判定为同店。
+    # 因为我们已经限制了词长必须 >= 4 且剔除了所有剧毒词，此时的交集应该非常纯粹。
+    intersection = set(words1).intersection(set(words2))
     return len(intersection) >= 1
+
 
 # ==========================================
 # 分类引擎
@@ -611,7 +632,7 @@ with tab_dashboard:
                             st.session_state['my_df'] = my_df
                             st.success(f"🪄 智能关联更新触发：本次修改自动波及了账单中 {total_updated} 条相似记录！")
                             st.rerun()
-                            
+
 
 with tab_trends:
     if global_df.empty:
