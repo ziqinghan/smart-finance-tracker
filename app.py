@@ -5,6 +5,9 @@ import plotly.express as px
 import os
 import re
 from datetime import datetime
+import base64
+import requests
+
 
 # 页面配置
 st.set_page_config(page_title="Shareable 智能财务管家", page_icon="🌍", layout="wide")
@@ -57,8 +60,50 @@ def load_global_knowledge():
     return pd.DataFrame(columns=["交易描述", "类别", "贡献次数"])
 
 def save_global_knowledge(df):
+    """保存全局共享记忆，并尝试自动 Push 到 GitHub 仓库"""
+    # 1. 永远先在云端临时环境保存一份，确保当前会话立刻生效
     df.to_csv(GLOBAL_KNOWLEDGE_FILE, index=False)
-
+    
+    # 2. 检查是否配置了 GitHub 密钥 (Streamlit Secrets)
+    if "GITHUB_TOKEN" in st.secrets and "GITHUB_REPO" in st.secrets:
+        token = st.secrets["GITHUB_TOKEN"]
+        repo = st.secrets["GITHUB_REPO"]  # 格式应为 "你的用户名/仓库名"
+        file_path = GLOBAL_KNOWLEDGE_FILE
+        
+        url = f"https://api.github.com/repos/{repo}/contents/{file_path}"
+        headers = {
+            "Authorization": f"token {token}",
+            "Accept": "application/vnd.github.v3+json"
+        }
+        
+        try:
+            # A. 先获取当前 GitHub 上文件的 SHA 值（必须有 SHA 才能覆盖更新）
+            get_resp = requests.get(url, headers=headers)
+            sha = get_resp.json().get("sha") if get_resp.status_code == 200 else None
+            
+            # B. 将 DataFrame 转为 CSV 并进行 Base64 编码
+            csv_content = df.to_csv(index=False)
+            encoded_content = base64.b64encode(csv_content.encode('utf-8')).decode('utf-8')
+            
+            # C. 构建提交的 Payload
+            payload = {
+                "message": "🤖 Auto-update Shared Knowledge Brain",
+                "content": encoded_content
+            }
+            if sha:
+                payload["sha"] = sha
+                
+            # D. 发送 PUT 请求，真正写入 GitHub
+            put_resp = requests.put(url, headers=headers, json=payload)
+            
+            if put_resp.status_code in [200, 201]:
+                # 这是一个后台静默操作，通常不需要打扰用户
+                pass 
+            else:
+                print(f"GitHub Sync Failed: {put_resp.text}")
+        except Exception as e:
+            print(f"GitHub API Error: {str(e)}")
+            
 def update_global_knowledge(description, category):
     """
     当任何用户修正分类时，尝试更新到全局大脑。
