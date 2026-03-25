@@ -21,6 +21,12 @@ GLOBAL_KNOWLEDGE_FILE = "shared_knowledge.csv"
 # 【个人隐私黑名单】：包含这些关键词的交易，绝对不会被上传到公共大脑
 PERSONAL_BLACKLIST = ["zelle", "venmo", "transfer", "online banking", "payment", "epay", "check", "deposit", "payroll", "ach"]
 
+# 无意义词汇黑名单（用于智能关联更新时不被这些词干扰）
+STOP_WORDS = {"the", "and", "store", "shop", "cafe", "restaurant", "market", 
+              "inc", "llc", "com", "www", "st", "rd", "ave", "san", "jose", 
+              "francisco", "ca", "ny", "tx", "pay", "payment", "bill", "sq", 
+              "tst", "pos", "terminal", "valley", "fair", "center"}
+
 CATEGORIES = [
     "☕️ 咖啡奶茶", "🍱 餐饮外卖", "🛍️ 购物超市", "🛒 宠物消费", "🚗 交通油费",
     "✈️ 旅行住宿", "🧘🏻‍♀️ 运动健身", "🎿 娱乐票务", "🏥 医疗健康", "🏠 房租水电",
@@ -126,6 +132,30 @@ def update_global_knowledge(description, category):
         
     save_global_knowledge(global_df)
     return True
+
+
+def are_names_similar(name1, name2):
+    """判断两个商户名是否指向同一家店 (核心词交集法)"""
+    def extract_core_words(text):
+        # 1. 转小写并去除非字母数字
+        clean_text = re.sub(r'[^a-z0-9\s]', ' ', str(text).lower())
+        # 2. 拆分单词，过滤掉短词、纯数字和停用词
+        words = set()
+        for w in clean_text.split():
+            if len(w) > 2 and not w.isnumeric() and w not in STOP_WORDS:
+                words.add(w)
+        return words
+
+    words1 = extract_core_words(name1)
+    words2 = extract_core_words(name2)
+    
+    # 如果两者都没有提取出有效核心词，无法判断
+    if not words1 or not words2:
+        return False
+        
+    # 计算交集：只要有1个核心长单词完全匹配，我们就认为它们是一家店
+    intersection = words1.intersection(words2)
+    return len(intersection) >= 1
 
 # ==========================================
 # 分类引擎
@@ -555,20 +585,34 @@ with tab_dashboard:
                         if diff.any():
                             changed_rows = edited_df[diff]
                             my_df = st.session_state['my_df']
+                            
+                            # 记录一下这次我们一共波及了多少条数据
+                            total_updated = 0
+                            
                             for _, row in changed_rows.iterrows():
                                 target_desc = row['交易描述']
                                 new_cat = row['类别']
                                 
-                                mask = my_df['交易描述'] == target_desc
+                                # 🔍 核心升级：不只找名字完全一样的，只要相似的全找出来
+                                mask = my_df['交易描述'].apply(lambda x: are_names_similar(x, target_desc) or x == target_desc)
+                                
+                                # 统计这次关联更新了多少条
+                                affected_count = mask.sum()
+                                total_updated += affected_count
+                                
+                                # 1. 批量更新当前用户的 Session State
                                 my_df.loc[mask, '类别'] = new_cat
                                 
+                                # 2. 尝试推送到服务器全局大脑 (只推送用户实际点击的那个源头名称)
                                 is_shared = update_global_knowledge(target_desc, new_cat)
                                 if is_shared:
                                     st.toast(f"🌍 感谢贡献！'{target_desc}' 已全网同步为 {new_cat}")
                                     
                             st.session_state['my_df'] = my_df
+                            st.success(f"🪄 智能关联更新触发：本次修改自动波及了账单中 {total_updated} 条相似记录！")
                             st.rerun()
                             
+
 with tab_trends:
     if global_df.empty:
         st.info("暂无数据，请先上传账单。")
