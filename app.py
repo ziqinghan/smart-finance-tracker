@@ -7,6 +7,7 @@ import re
 from datetime import datetime
 import base64
 import requests
+import threading
 
 
 # 页面配置
@@ -54,56 +55,48 @@ if 'my_df' not in st.session_state:
 # ==========================================
 # 全局大脑逻辑 (Federated Learning)
 # ==========================================
+# 增加 @st.cache_data 装饰器，设置 60 秒的过期时间
+@st.cache_data(ttl=60)
 def load_global_knowledge():
-    """读取所有用户的共享分类记忆"""
+    """读取所有用户的共享分类记忆（带缓存加速）"""
     if os.path.exists(GLOBAL_KNOWLEDGE_FILE):
         return pd.read_csv(GLOBAL_KNOWLEDGE_FILE)
     return pd.DataFrame(columns=["交易描述", "类别", "贡献次数"])
 
 def save_global_knowledge(df):
-    """保存全局共享记忆，并尝试自动 Push 到 GitHub 仓库"""
+    """保存全局共享记忆，并尝试自动 Push 到 GitHub 仓库 (异步非阻塞)"""
     # 1. 永远先在云端临时环境保存一份，确保当前会话立刻生效
     df.to_csv(GLOBAL_KNOWLEDGE_FILE, index=False)
     
-    # 2. 检查是否配置了 GitHub 密钥 (Streamlit Secrets)
-    if "GITHUB_TOKEN" in st.secrets and "GITHUB_REPO" in st.secrets:
-        token = st.secrets["GITHUB_TOKEN"]
-        repo = st.secrets["GITHUB_REPO"]  # 格式应为 "你的用户名/仓库名"
-        file_path = GLOBAL_KNOWLEDGE_FILE
-        
-        url = f"https://api.github.com/repos/{repo}/contents/{file_path}"
-        headers = {
-            "Authorization": f"token {token}",
-            "Accept": "application/vnd.github.v3+json"
-        }
-        
-        try:
-            # A. 先获取当前 GitHub 上文件的 SHA 值（必须有 SHA 才能覆盖更新）
-            get_resp = requests.get(url, headers=headers)
-            sha = get_resp.json().get("sha") if get_resp.status_code == 200 else None
+    # 清除读取缓存，确保下一次读取是最新的
+    load_global_knowledge.clear()
+
+    # 2. 把耗时的网络请求放到后台线程去跑
+    def push_to_github():
+        if "GITHUB_TOKEN" in st.secrets and "GITHUB_REPO" in st.secrets:
+            token = st.secrets["GITHUB_TOKEN"]
+            repo = st.secrets["GITHUB_REPO"]
+            file_path = GLOBAL_KNOWLEDGE_FILE
+            url = f"https://api.github.com/repos/{repo}/contents/{file_path}"
+            headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
             
-            # B. 将 DataFrame 转为 CSV 并进行 Base64 编码
-            csv_content = df.to_csv(index=False)
-            encoded_content = base64.b64encode(csv_content.encode('utf-8')).decode('utf-8')
-            
-            # C. 构建提交的 Payload
-            payload = {
-                "message": "🤖 Auto-update Shared Knowledge Brain",
-                "content": encoded_content
-            }
-            if sha:
-                payload["sha"] = sha
+            try:
+                get_resp = requests.get(url, headers=headers)
+                sha = get_resp.json().get("sha") if get_resp.status_code == 200 else None
                 
-            # D. 发送 PUT 请求，真正写入 GitHub
-            put_resp = requests.put(url, headers=headers, json=payload)
-            
-            if put_resp.status_code in [200, 201]:
-                # 这是一个后台静默操作，通常不需要打扰用户
-                pass 
-            else:
-                print(f"GitHub Sync Failed: {put_resp.text}")
-        except Exception as e:
-            print(f"GitHub API Error: {str(e)}")
+                csv_content = df.to_csv(index=False)
+                encoded_content = base64.b64encode(csv_content.encode('utf-8')).decode('utf-8')
+                
+                payload = {"message": "🤖 Auto-update Shared Knowledge Brain", "content": encoded_content}
+                if sha: payload["sha"] = sha
+                    
+                requests.put(url, headers=headers, json=payload)
+            except Exception as e:
+                pass
+                
+    # 启动后台线程，不阻塞当前网页刷新
+    threading.Thread(target=push_to_github).start()
+
 
 def update_global_knowledge(description, category):
     """
@@ -541,39 +534,41 @@ with tab_dashboard:
                 
                 with st.expander(exp_title):
                     detail_df = cat_df[['日期', '交易描述', '金额', '类别']].copy().reset_index(drop=True)
-                    edited_df = st.data_editor(
-                        detail_df,
-                        column_config={
-                            "日期": st.column_config.DateColumn("交易日期", disabled=True),
-                            "交易描述": st.column_config.TextColumn("交易描述", disabled=True),
-                            "金额": st.column_config.NumberColumn("金额", format="%.2f", disabled=True),
-                            "类别": st.column_config.SelectboxColumn("分类 (双击修改 ✍️)", options=CATEGORIES, required=True)
-                        },
-                        hide_index=True, use_container_width=True, key=f"editor_{category}_{selected_month}"
-                    )
                     
-                    diff = edited_df['类别'] != detail_df['类别']
-                    if diff.any():
-                        changed_rows = edited_df[diff]
-                        my_df = st.session_state['my_df']
-                        for _, row in changed_rows.iterrows():
-                            target_desc = row['交易描述']
-                            new_cat = row['类别']
-                            
-                            # 1. 批量更新当前用户的 Session State
-                            mask = my_df['交易描述'] == target_desc
-                            my_df.loc[mask, '类别'] = new_cat
-                            
-                            # 2. 尝试推送到服务器全局大脑
-                            is_shared = update_global_knowledge(target_desc, new_cat)
-                            if is_shared:
-                                st.toast(f"🌍 感谢贡献！'{target_desc}' 已全网同步为 {new_cat}")
-                            else:
-                                st.toast(f"🔒 隐私保护：'{target_desc}' 仅在本地为您修正为 {new_cat}")
+                    # 生成一个唯一的表单，让用户可以一次性改好几行，最后点保存
+                    with st.form(key=f"form_{category}_{selected_month}"):
+                        edited_df = st.data_editor(
+                            detail_df,
+                            column_config={
+                                "日期": st.column_config.DateColumn("交易日期", disabled=True),
+                                "交易描述": st.column_config.TextColumn("交易描述", disabled=True),
+                                "金额": st.column_config.NumberColumn("金额", format="%.2f", disabled=True),
+                                "类别": st.column_config.SelectboxColumn("分类 (双击修改 ✍️)", options=CATEGORIES, required=True)
+                            },
+                            hide_index=True, use_container_width=True
+                        )
+                        
+                        submit_edits = st.form_submit_button("💾 批量保存修改")
+                        
+                    if submit_edits:
+                        diff = edited_df['类别'] != detail_df['类别']
+                        if diff.any():
+                            changed_rows = edited_df[diff]
+                            my_df = st.session_state['my_df']
+                            for _, row in changed_rows.iterrows():
+                                target_desc = row['交易描述']
+                                new_cat = row['类别']
                                 
-                        st.session_state['my_df'] = my_df
-                        st.rerun()
-
+                                mask = my_df['交易描述'] == target_desc
+                                my_df.loc[mask, '类别'] = new_cat
+                                
+                                is_shared = update_global_knowledge(target_desc, new_cat)
+                                if is_shared:
+                                    st.toast(f"🌍 感谢贡献！'{target_desc}' 已全网同步为 {new_cat}")
+                                    
+                            st.session_state['my_df'] = my_df
+                            st.rerun()
+                            
 with tab_trends:
     if global_df.empty:
         st.info("暂无数据，请先上传账单。")
